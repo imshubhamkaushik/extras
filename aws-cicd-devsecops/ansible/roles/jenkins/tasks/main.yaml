@@ -1,0 +1,46 @@
+# This Ansible playbook installs Jenkins on an Ubuntu server. It performs the following tasks:
+---
+- name: Install Java 17 (required by Jenkins)
+  apt:
+    name: openjdk-17-jdk
+    state: present
+
+# Creates the directory for storing apt keyrings if it doesn't already exist.
+- name: Create apt keyrings directory
+  file:
+    path: /usr/share/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Import Jenkins GPG key to the system
+  get_url:
+    url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+    dest: /usr/share/keyrings/jenkins.asc
+    mode: '0644'
+
+- name: Add Jenkins apt repository
+  apt_repository:
+    repo: deb [signed-by=/usr/share/keyrings/jenkins.asc] https://pkg.jenkins.io/debian-stable binary/
+    state: present
+    filename: jenkins
+
+- name: Install Jenkins
+  apt:
+    name: jenkins
+    state: present
+    update_cache: yes
+  notify: restart jenkins
+
+# Enables and starts the Jenkins service.
+- name: Enable and start Jenkins
+  service:
+    name: jenkins
+    state: started
+    enabled: true
+
+# Waits for Jenkins to start and listen on port 8080 before proceeding.
+- name: Wait for Jenkins to start and listen on port 8080
+  wait_for:
+    port: 8080
+    delay: 10
+    timeout: 120

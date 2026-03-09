@@ -1,0 +1,44 @@
+---
+# SonarQube's embedded Elasticsearch requires vm.max_map_count >= 524288.
+- name: Set vm.max_map_count for Elasticsearch (required by SonarQube)
+  sysctl:
+    name: vm.max_map_count
+    value: "524288"
+    state: present
+    reload: yes
+
+# Persist vm.max_map_count across reboots
+- name: Persist vm.max_map_count across reboots
+  lineinfile:
+    path: /etc/sysctl.conf
+    line: "vm.max_map_count=524288"
+    state: present
+
+# Create SonarQube data directories
+- name: Create Sonar directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+    owner: "1000"
+    group: "1000"
+  loop:
+    - /opt/sonarqube/data
+    - /opt/sonarqube/logs
+    - /opt/sonarqube/extensions
+
+# Run SonarQube container
+- name: Run SonarQube container
+  # FQCN is required when the collection is installed via requirements.yml. The collection itself must be installed:
+  #   ansible-galaxy collection install -r requirements.yml
+  community.docker.docker_container:
+    name: sonarqube
+    image: sonarqube:lts-community
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - /opt/sonarqube/data:/opt/sonarqube/data
+      - /opt/sonarqube/logs:/opt/sonarqube/logs
+      - /opt/sonarqube/extensions:/opt/sonarqube/extensions
