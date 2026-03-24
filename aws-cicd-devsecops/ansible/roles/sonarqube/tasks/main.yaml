@@ -6,13 +6,7 @@
     value: "524288"
     state: present
     reload: yes
-
-# Persist vm.max_map_count across reboots
-- name: Persist vm.max_map_count across reboots
-  lineinfile:
-    path: /etc/sysctl.conf
-    line: "vm.max_map_count=524288"
-    state: present
+    sysctl_file: /etc/sysctl.d/99-sonarqube.conf
 
 # Create SonarQube data directories
 - name: Create Sonar directories
@@ -38,6 +32,11 @@
     restart_policy: unless-stopped
     ports:
       - "9000:9000"
+    env:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+      SONAR_WEB_JAVAOPTS: "-Xms256m -Xmx512m"
+      SONAR_CE_JAVAOPTS: "-Xms256m -Xmx512m"
+      SONAR_SEARCH_JAVAOPTS: "-Xms256m -Xmx512m"
     volumes:
       - /opt/sonarqube/data:/opt/sonarqube/data
       - /opt/sonarqube/logs:/opt/sonarqube/logs

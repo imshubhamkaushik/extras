@@ -1,8 +1,8 @@
 # This Ansible playbook installs Jenkins on an Ubuntu server. It performs the following tasks:
 ---
-- name: Install Java 17 (required by Jenkins)
+- name: Install Java 21 (required by Jenkins)
   apt:
-    name: openjdk-17-jdk
+    name: openjdk-21-jdk
     state: present
 
 # Creates the directory for storing apt keyrings if it doesn't already exist.

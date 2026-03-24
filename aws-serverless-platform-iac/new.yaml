@@ -1,0 +1,262 @@
+name: Catalogix CI/CD
+
+on:
+  push:
+    branches: ["main"]
+
+concurrency:
+  group: catalogix-main
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  APP_NAME: catalogix
+  MAJOR_VERSION: "1.0"
+
+# PHASE 0 — PIPELINE CONTEXT (RUNS ONCE)
+
+jobs:
+  context:
+    name: 🧩 Phase 0 -- Pipeline Context
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+
+    steps:
+      - name: Generate image tag
+        id: tag
+        run: |
+          IMAGE_TAG="${{ env.MAJOR_VERSION }}-${{ github.run_number }}"
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Image tag: $IMAGE_TAG"
+
+# PHASE 1 — BUILD & TEST
+# PHASE 1A — FRONTEND BUILD
+
+  build-frontend-svcs:
+    name: 🧪 Phase 1A -- Build Frontend - ${{ matrix.service }}
+    runs-on: ubuntu-22.04
+    needs: context
+
+    strategy:
+      fail-fast: true
+      matrix:
+        service: [frontend-svc]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Build ${{ matrix.service }}
+        run: |
+          cd ${{ matrix.service }}
+          npm ci
+          npm run build
+
+# PHASE 1B — BACKEND BUILD & TEST
+
+  build-backend-svcs:
+    name: 🧪 Phase 1B -- Build & Test Backend - ${{ matrix.service }}
+    runs-on: ubuntu-22.04
+    needs: build-frontend-svcs
+
+    strategy:
+      fail-fast: true
+      matrix:
+        service: [user-svc, product-svc]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Build & Test - ${{ matrix.service }}
+        run: mvn -B -f ${{ matrix.service }}/pom.xml clean verify
+
+      # -------- SonarQube (non-blocking by design) --------
+      # - name: SonarQube Scan - ${{ matrix.service }}
+      #   if: always()
+      #   continue-on-error: true
+      #   env:
+      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      #   run: |
+      #     mvn -f ${{ matrix.service }}/pom.xml sonar:sonar \
+      #       -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+      #       -Dsonar.login=$SONAR_TOKEN
+
+# PHASE 2 — DOCKER BUILD
+
+  docker-build:
+    name: 🐳 Phase 2 -- Docker Build - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs:
+      - context
+      - build-frontend-svcs
+      - build-backend-svcs
+      
+    strategy:
+      matrix:
+        service: [user-svc, product-svc, frontend-svc]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ steps.ecr.outputs.registry }}/${{ env.APP_NAME }}-${{ matrix.service }}:${{ needs.context.outputs.image_tag }} \
+            ./${{ matrix.service }}
+
+# PHASE 3 — TRIVY SECURITY SCAN
+
+  trivy-scan-image:
+    name: 🔐 Phase 3 -- Trivy Security Scan - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: docker-build
+
+    strategy:
+      matrix:
+        service: [user-svc, product-svc, frontend-svc]
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/${{ env.APP_NAME }}-${{ matrix.service }}:${{ needs.context.outputs.image_tag }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+# PHASE 4 — PUSH TO ECR
+
+  push-image:
+    name: 📦 Phase 4 -- Push Image to ECR - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: trivy-scan-image
+
+    strategy:
+      matrix:
+        service: [user-svc, product-svc, frontend-svc]
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Push image
+        run: |
+          docker push \
+            ${{ steps.ecr.outputs.registry }}/${{ env.APP_NAME }}-${{ matrix.service }}:${{ needs.context.outputs.image_tag }}
+
+# PHASE 5 — DEPLOY TO ECS
+
+  deploy:
+    name: 🚀 Phase 5 -- Deploy to ECS - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: push-image
+
+    strategy:
+      matrix:
+        service: [user-svc, product-svc, frontend-svc]
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - run: |
+          aws ecs update-service \
+            --cluster ${{ env.APP_NAME }}-cluster \
+            --service ${{ matrix.service }} \
+            --force-new-deployment
+
+# FINAL — PIPELINE RESULT
+
+  pipeline-summary:
+    name: 📊 Pipeline Result
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - build-backend-svcs
+      - build-frontend-svcs
+      - docker-build
+      - trivy-scan-image
+      - push-image
+      - deploy
+
+    steps:
+      - run: |
+          echo "================ Pipeline Summary ================"
+
+          echo ""
+          echo "Frontend Services:"
+          echo "  - frontend-svc : ${{ needs.build-frontend-svcs.result }}"
+
+          echo ""
+          echo "Backend Services:"
+          echo "  - user-svc     : ${{ needs.build-backend-svcs.result }}"
+          echo "  - product-svc  : ${{ needs.build-backend-svcs.result }}"
+
+          echo ""
+          echo "Docker & Deployment Stages:"
+          echo "  - Docker Build : ${{ needs.docker-build.result }}"
+          echo "  - Trivy Security Scan   : ${{ needs.trivy-scan-image.result }}"
+          echo "  - Push Image to ECR   : ${{ needs.push-image.result }}"
+          echo "  - Deploy to ECS      : ${{ needs.deploy.result }}"
+
+          echo ""
+          echo "=================================================="
+
+          if [[ \
+            "${{ needs.build-frontend-svcs.result }}" != "success" || \
+            "${{ needs.build-backend-svcs.result }}" != "success" || \
+            "${{ needs.docker-build.result }}" != "success" || \
+            "${{ needs.trivy-scan-image.result }}" != "success" || \
+            "${{ needs.push-image.result }}" != "success" || \
+            "${{ needs.deploy.result }}" != "success" \
+          ]]; then
+            echo "❌ Catalogix pipeline FAILED"
+            exit 1
+          else
+            echo "✅ Catalogix pipeline SUCCESS"
+          fi

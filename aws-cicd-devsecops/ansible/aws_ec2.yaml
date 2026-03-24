@@ -19,4 +19,4 @@ hostnames:
     # Ansible runs from outside AWS (developer laptop or CI), so it needs the public IP. EC2 instances are now in public subnets with public IPs assigned
 
 compose:
-  - public-ip-address
+  ansible_host: public_ip_address

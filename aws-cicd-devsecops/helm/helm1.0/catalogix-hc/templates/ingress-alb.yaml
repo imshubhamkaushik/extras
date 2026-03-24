@@ -1,0 +1,56 @@
+{{ if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1 
+kind: Ingress
+metadata:
+  name: catalogix-ingress
+  # namespace: {{ .Release.Namespace }}
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # Application is intentionally internet-facing(Public ALB). Backend services remain private behind the ALB.
+    alb.ingress.kubernetes.io/target-type: ip
+    # Targets pods directly instead of nodes. Required best practice for EKS + ALB.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    # alb.ingress.kubernetes.io/ssl-redirect: 'false'
+    # TLS-ready design (ACM can be attached later).
+    # Enforces HTTPS without app-level changes.
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
+    alb.ingress.kubernetes.io/success-codes: "200-399"
+    # HIGHLIGHT:
+    # Health checks terminate at service layer, not pod IPs.
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+spec:
+  ingressClassName: alb
+  rules:
+    # - host: {{ .Values.ingress.host | default "shop.local" }}
+    # Remove the host line and unindent the http block below so it applies to ALL hosts
+    - http:
+        paths:
+          # React Frontend (handles SPA routes)
+          - path: {{ .Values.ingress.paths.frontend | default "/" }}
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-svc
+                port:
+                  number: {{ .Values.frontendSvc.service.port | int }}
+          # User Service
+          - path: {{ .Values.ingress.paths.users | default "/users" }}
+            pathType: Prefix
+            backend:
+              service:
+                name: user-svc
+                port:
+                  number: {{ .Values.userSvc.service.port | int }}
+
+          # Product service
+          - path: {{ .Values.ingress.paths.products | default "/products" }}
+            pathType: Prefix
+            backend:
+              service:
+                name: product-svc
+                port:
+                  number: {{ .Values.productSvc.service.port | int }}
+{{ end }}
