@@ -1,7 +1,9 @@
 ---
 # Tasks for installing DevOps tools like AWS CLI, kubectl, Helm, and Trivy
-# Versions of tools are defined in ansible/group_vars/all.yaml for easy maintenance. Ensure that the EC2 instances have access to the internet to download these tools
+# Tool versions are defined in ansible/group_vars/all.yaml for single-source control and easy maintenance. 
+# Ensure that the EC2 instances have access to the internet to download these tools
 
+# AWS CLI
 - name: Check AWS CLI installation
   command: aws --version
   register: aws_cli_check
@@ -28,7 +30,7 @@
 
 # Kubernetes CLI (kubectl)
 - name: Check kubectl version
-  command: kubectl version --client
+  command: kubectl version --client --output=json
   register: kubectl_check
   changed_when: false
   failed_when: false
@@ -43,7 +45,7 @@
 
 # Helm
 - name: Check Helm version
-  command: helm version
+  command: helm version --short
   register: helm_check
   changed_when: false
   failed_when: false
@@ -55,14 +57,14 @@
     force: true
   when: helm_version not in (helm_check.stdout | default(''))
 
-- name: Extract Helm
+- name: Extract Helm Archive
   unarchive:
     src: /tmp/helm.tar.gz
     dest: /tmp
     remote_src: yes
   when: helm_version not in (helm_check.stdout | default(''))
 
-- name: Install Helm binary to /usr/local/bin
+- name: Install Helm binary
   copy:
     src: /tmp/linux-amd64/helm
     dest: /usr/local/bin/helm
@@ -88,3 +90,34 @@
   apt:
     deb: /tmp/trivy.deb
   when: trivy_version not in (trivy_check.stdout | default(''))
+
+# Sonar Scanner
+- name: Check Sonar Scanner version
+  command: sonar-scanner --version
+  register: sonar_check
+  changed_when: false
+  failed_when: false
+
+- name: Download Sonar Scanner {{ sonar_scanner_version }}
+  get_url:
+    url: "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-{{ sonar_scanner_version }}-linux-x64.zip"
+    dest: /tmp/sonar-scanner.zip
+    force: true
+  when: sonar_scanner_version not in (sonar_check.stdout | default(''))
+
+- name: Unzip Sonar Scanner
+  unarchive:
+    src: /tmp/sonar-scanner.zip
+    dest: /opt/
+    remote_src: yes
+  when: sonar_scanner_version not in (sonar_check.stdout | default(''))
+
+# Create symlink so 'sonar-scanner' is available on PATH without full path.
+# Previously the binary was extracted to /opt/ but never added to PATH.
+- name: Create sonar-scanner symlink in /usr/local/bin
+  file:
+    src: "/opt/sonar-scanner-cli-{{ sonar_scanner_version }}-linux-x64/bin/sonar-scanner"
+    dest: /usr/local/bin/sonar-scanner
+    state: link
+    force: yes
+  when: sonar_scanner_version not in (sonar_check.stdout | default(''))

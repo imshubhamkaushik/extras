@@ -12,6 +12,7 @@
     state: directory
     mode: '0755'
 
+# Install Jenkins
 - name: Import Jenkins GPG key to the system
   get_url:
     url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
@@ -31,6 +32,43 @@
     update_cache: yes
   notify: restart jenkins
 
+# Install plugins before start
+- name: Copy Jenkins plugins list 
+  copy:
+    src: plugins.yaml
+    dest: /tmp/plugins.yaml
+
+- name: Install Jenkins plugins
+  shell: |
+    jenkins-plugin-cli --plugin-file /tmp/plugins.yaml
+  args:
+    creates: var/lib/jenkins/plugins
+
+# Add JSasC config
+- name: Create JCasC configs directory # Create the casc_configs directory
+  file:
+    path: /var/lib/jenkins/casc_configs
+    state: directory
+    owner: jenkins
+    group: jenkins
+    mode: '0755'
+
+- name: Copy JCasC config file to Jenkins server # Copy to jcasc.yaml
+  copy:
+    src: jcasc.yaml
+    dest: /var/lib/jenkins/casc_configs/jcasc.yaml
+    owner: jenkins
+    group: jenkins
+    mode: '0644'
+
+# Ensure correct permissions
+- name: Fix Jenkins home directorypermissions
+  file:
+    path: /var/lib/jenkins
+    owner: jenkins
+    group: jenkins
+    recurse: yes
+
 # Enables and starts the Jenkins service.
 - name: Enable and start Jenkins
   service:
@@ -38,9 +76,28 @@
     state: started
     enabled: true
 
-# Waits for Jenkins to start and listen on port 8080 before proceeding.
+# Wait for Jenkins to start and listen on port 8080 before proceeding.
 - name: Wait for Jenkins to start and listen on port 8080
   wait_for:
     port: 8080
     delay: 10
     timeout: 120
+
+# Set Jenkins environment variables
+- name: Set Jenkins environment variables
+  blockinfile:
+    path: /etc/default/jenkins
+    marker: "# {mark} ANSIBLE MANAGED — JCasC and credentials"
+    block: |
+      CASC_JENKINS_CONFIG=/var/lib/jenkins/casc_configs/jcasc.yaml
+
+      JENKINS_ADMIN_USER={{ jenkins_admin_user }}
+      JENKINS_ADMIN_PASSWORD={{ vault_jenkins_admin_password }}
+
+      JENKINS_URL={{ ansible_host }}
+      SONAR_HOST={{ hostvars[groups['sonarqube'][0]]['ansible_host'] }}
+
+      GIT_REPO_URL={{ git_repo_url }}
+      GITHUB_TOKEN={{ vault_github_token }}
+      SONAR_TOKEN={{ vault_sonar_token }}
+  notify: restart jenkins

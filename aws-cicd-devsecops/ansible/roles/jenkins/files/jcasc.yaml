@@ -1,0 +1,126 @@
+jenkins:
+  systemMessage: "Catalogix CI/CD — configured automatically via JCasC"
+  numExecutors: 2
+  mode: NORMAL
+
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_USER}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+    
+  authorizationStrategy:
+    globalMatrix:
+      permissions:
+        - "Overall/Administer:${JENKINS_ADMIN_USER}"
+
+unclassified:
+  location:
+    url: "http://${JENKINS_URL}:8080/"
+
+  sonarGlobalConfiguration:
+    installations:
+      - name: "sonarqube"
+        serverUrl: "http://${SONARQUBE_HOST}:9000"
+        credentialsId: "sonarqube-token"
+
+tool:
+  git:
+    installations:
+      - name: "git"
+        home: "/usr/bin/git"
+
+  maven:
+    installations:
+      - name: "maven"
+        properties:
+          - installSource:
+              installers:
+                - maven:
+                    id: "3.9.9"
+ 
+  nodejs:
+    installations:
+      - name: "node"
+        properties:
+          - installSource:
+              installers:
+                - nodeJSInstaller:
+                    id: "20.18.0"
+                    npmPackagesRefreshHours: 72
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          # GitHub Token
+          - string:
+              scope: GLOBAL
+              id: "github-token"
+              secret: "${GITHUB_TOKEN}"
+          # AWS Credentials (OPTIONAL - only if you want to use static credentials instead of instance metadata)
+          # - string:
+          #     scope: GLOBAL
+          #     id: "aws-access-key"
+          #     secret: "REPLACE"
+          # - string:
+          #     scope: GLOBAL
+          #     id: "aws-secret-key"
+          #     secret: "REPLACE"
+          # SonarQube Token
+          - string:
+              scope: GLOBAL
+              id: "sonarqube-token"
+              secret: "${SONARQUBE_TOKEN}"
+
+          # NOTE: AWS credentials are intentionally omitted.
+          # Jenkins EC2 has AdministratorAccess via its IAM instance profile.
+          # AWS CLI on the Jenkins agent uses instance metadata automatically —
+          # no static access keys needed. See Jenkinsfile.app-cicd for how
+          # AWS CLI is called without a credential binding.
+
+# Job Definitions — both pipelines created automatically on Jenkins startup
+jobs:
+  # Platform Infra Pipeline
+  - script: >
+      pipelineJob('platform-infra') {
+        description('Provision infrastructure using Terraform')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('${GIT_REPO_URL}')
+                  credentials('github-token')
+                }
+                branches('*/main')
+              }
+            }
+            scriptPath('Jenkinsfile.platform-infra')
+          }
+        }
+      }
+
+  # Application CICD Pipeline
+  - script: >
+      pipelineJob('app-cicd') {
+        description('Application CICD Pipeline - Build, Scan, Deploy')
+        triggers {
+          githubPush()
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('${GIT_REPO_URL}')
+                  credentials('github-token')
+                }
+                branches('*/main')
+              }
+            }
+            scriptPath('Jenkinsfile.app-cicd')
+          }
+        }
+      }

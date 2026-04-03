@@ -1,0 +1,39 @@
+# action.yaml
+# This is a custom GitHub Action for setting up Terraform in our workflows.
+
+name: "Terraform Setup"
+description: "Common setup for Terraform Workflows"
+inputs:
+  AWS_REGION:
+    description: "AWS Region for Terraform operations"
+    required: true
+    default: "ap-south-1"
+  AWS_ACCESS_KEY_ID:
+    description: "AWS Access Key ID"
+    required: true
+  AWS_SECRET_ACCESS_KEY:
+    description: "AWS Secret Access Key"
+    required: true
+  enable_terraform:
+    description: "Flag to enable Terraform setup (true/false)"
+    required: false
+    default: "true" # Default to true so you dont have to change your existing jobs, set to false if you want to skip terraform setup for any reason
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: ${{ inputs.AWS_REGION }}
+        aws-access-key-id: ${{ inputs.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ inputs.AWS_SECRET_ACCESS_KEY }}
+    
+    - name: Setup Terraform
+      if: ${{ inputs.enable_terraform == 'true' }} # Only runs if enable_terraform is true
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.14.0

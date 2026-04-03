@@ -14,9 +14,12 @@ keyed_groups:
     separator: ""
     # Setting prefix to "" and separator to "" means the group name is exactly the tag value: "jenkins" and "sonarqube".
 
-hostnames:
-  - public-ip-address
-    # Ansible runs from outside AWS (developer laptop or CI), so it needs the public IP. EC2 instances are now in public subnets with public IPs assigned
+groups:
+  jenkins: "'{{ tags.Role }}' == 'jenkins'"
+  sonarqube: "'{{ tags.Role }}' == 'sonarqube'"
 
 compose:
-  ansible_host: public_ip_address
+  # Jenkins is in a public subnet — use its public IP for direct SSH from your machine.
+  # SonarQube is in a private subnet — use its private IP, accessed via Jenkins as a jump host.
+  # See group_vars/sonarqube.yaml for the ProxyJump configuration.
+  ansible_host: "(public_ip_address if public_ip_address else private_ip_address)"
