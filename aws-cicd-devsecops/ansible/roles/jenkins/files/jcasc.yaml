@@ -59,26 +59,19 @@ credentials:
               scope: GLOBAL
               id: "github-token"
               secret: "${GITHUB_TOKEN}"
-          # AWS Credentials (OPTIONAL - only if you want to use static credentials instead of instance metadata)
-          # - string:
-          #     scope: GLOBAL
-          #     id: "aws-access-key"
-          #     secret: "REPLACE"
-          # - string:
-          #     scope: GLOBAL
-          #     id: "aws-secret-key"
-          #     secret: "REPLACE"
           # SonarQube Token
           - string:
               scope: GLOBAL
               id: "sonarqube-token"
               secret: "${SONARQUBE_TOKEN}"
-
-          # NOTE: AWS credentials are intentionally omitted.
-          # Jenkins EC2 has AdministratorAccess via its IAM instance profile.
-          # AWS CLI on the Jenkins agent uses instance metadata automatically —
-          # no static access keys needed. See Jenkinsfile.app-cicd for how
-          # AWS CLI is called without a credential binding.
+          # AWS IAM user credentials — access key + secret key
+          # Used by all AWS CLI and Terraform calls in the pipelines
+          - aws:
+              scope: GLOBAL
+              id: "aws-creds"
+              description: "AWS IAM user credentials for Catalogix"
+              accessKey: "${AWS_ACCESS_KEY_ID}"
+              secretKey: "${AWS_SECRET_ACCESS_KEY}"
 
 # Job Definitions — both pipelines created automatically on Jenkins startup
 jobs:

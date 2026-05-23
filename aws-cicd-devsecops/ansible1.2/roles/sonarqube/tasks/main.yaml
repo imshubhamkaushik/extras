@@ -1,0 +1,347 @@
+---
+# =============================================================================
+# SonarQube Role — tasks/main.yaml
+#
+# IDEMPOTENCY GUARANTEES:
+#   - sysctl: state=present is idempotent by design.
+#   - file: state=directory is idempotent by design.
+#   - docker_container: state=started is idempotent — does nothing if the
+#     container is already running with the same config.
+#   - Admin password change: guarded by an auth check first. Only runs when
+#     the vault password is not yet active (i.e., still on default "admin").
+#   - Token generation: guarded by vault_sonar_token check. Skipped entirely
+#     on re-runs when the token is already in the vault.
+#   - Vault write: guarded by the same check. The atomic shell script also
+#     validates the file is encrypted before touching it.
+#   - Webhook creation: guarded by name-based existence check.
+# =============================================================================
+
+
+# ── System prerequisites ──────────────────────────────────────────────────────
+
+# SonarQube embeds Elasticsearch. Elasticsearch refuses to start if
+# vm.max_map_count is below 524288. This sysctl setting persists across
+# reboots because sysctl_file writes to /etc/sysctl.d/99-sonarqube.conf.
+- name: Set vm.max_map_count for Elasticsearch (SonarQube requirement)
+  sysctl:
+    name: vm.max_map_count
+    value: "524288"
+    state: present
+    reload: yes
+    sysctl_file: /etc/sysctl.d/99-sonarqube.conf
+
+# SonarQube runs as UID 1000 inside the container. The host directories
+# must be owned by UID 1000 or SonarQube will fail to write logs/data.
+- name: Create SonarQube data directories with correct ownership
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+    owner: "1000"
+    group: "1000"
+  loop:
+    - /opt/sonarqube/data
+    - /opt/sonarqube/logs
+    - /opt/sonarqube/extensions
+
+
+# ── Container ─────────────────────────────────────────────────────────────────
+
+# community.docker.docker_container with state=started is idempotent:
+#   - If the container does not exist  → creates and starts it.
+#   - If the container is running      → does nothing.
+#   - If the container is stopped      → starts it.
+# restart_policy: unless-stopped means Docker restarts SonarQube on EC2
+# reboot but respects a manual 'docker stop'.
+- name: Run SonarQube container
+  community.docker.docker_container:
+    name: sonarqube
+    image: sonarqube:26.3.0.120487-community
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "9000:9000"
+    env:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+      SONAR_WEB_JAVAOPTS:    "-Xms256m -Xmx512m"
+      SONAR_CE_JAVAOPTS:     "-Xms256m -Xmx512m"
+      SONAR_SEARCH_JAVAOPTS: "-Xms256m -Xmx512m"
+    volumes:
+      - /opt/sonarqube/data:/opt/sonarqube/data
+      - /opt/sonarqube/logs:/opt/sonarqube/logs
+      - /opt/sonarqube/extensions:/opt/sonarqube/extensions
+
+
+# ── Health check ──────────────────────────────────────────────────────────────
+
+# SonarQube takes ~60–120 seconds to start on a small instance.
+# Poll /api/system/status until {"status":"UP"} before proceeding.
+# retries * delay = 300 seconds max wait.
+- name: Wait for SonarQube to be healthy (status=UP)
+  uri:
+    url: "http://localhost:9000/api/system/status"
+    method: GET
+    status_code: 200
+    return_content: yes
+  register: sq_status
+  until: sq_status.json is defined and sq_status.json.status == "UP"
+  retries: 30
+  delay: 10
+
+
+# ── Admin password ────────────────────────────────────────────────────────────
+
+# Check whether the vault password already works.
+# - If it returns valid=true  → password was already changed in a previous run.
+# - If it returns valid=false → still on the default "admin" password.
+# failed_when: false means a 401 (wrong creds) is not treated as a task failure.
+- name: Verify if vault admin password is already active
+  uri:
+    url: "http://localhost:9000/api/authentication/validate"
+    method: GET
+    user: admin
+    password: "{{ vault_sonar_admin_password }}"
+    force_basic_auth: yes
+    status_code: [200, 401]
+  register: auth_check
+  failed_when: false
+
+# Only change the password when vault_sonar_admin_password does not yet work.
+# Sending the change request when the password is already set would return 401
+# (wrong previousPassword) and fail.
+- name: Change SonarQube admin password from default to vault value
+  uri:
+    url: "http://localhost:9000/api/users/change_password"
+    method: POST
+    user: admin
+    password: admin                           # current default password
+    force_basic_auth: yes
+    body_format: form-urlencoded
+    body:
+      login:            admin
+      previousPassword: admin
+      password:         "{{ vault_sonar_admin_password }}"
+    status_code: [200, 204]
+  when:
+    - auth_check.json is defined
+    - not auth_check.json.valid               # vault password not yet active
+
+
+# ── Token handling ────────────────────────────────────────────────────────────
+
+# Read vault_sonar_token from the vault. On first run it is an empty string.
+# On subsequent runs it holds the real token — in which case we skip all token
+# work entirely to avoid revoking a token Jenkins is actively using.
+- name: Determine whether vault_sonar_token is already populated
+  set_fact:
+    sonar_token_in_vault: "{{ vault_sonar_token | default('') | length > 0 }}"
+
+# List all tokens for the admin user — needed to detect a stale 'jenkins-token'
+# that exists in SonarQube but was never written to the vault (e.g. a previous
+# run crashed between token generation and the vault write).
+- name: List existing SonarQube user tokens
+  uri:
+    url: "http://localhost:9000/api/user_tokens/search"
+    method: GET
+    user: admin
+    password: "{{ vault_sonar_admin_password }}"
+    force_basic_auth: yes
+    status_code: 200
+  register: sonar_tokens
+  when: not sonar_token_in_vault
+
+- name: Check if jenkins-token already exists in SonarQube
+  set_fact:
+    jenkins_token_exists: >-
+      {{
+        sonar_tokens.json is defined and
+        (sonar_tokens.json.userTokens
+          | selectattr('name', 'equalto', 'jenkins-token')
+          | list | length > 0)
+      }}
+  when: not sonar_token_in_vault
+
+# If jenkins-token exists in SonarQube but vault_sonar_token is empty,
+# the token value was lost (plaintext is only returned at generation time).
+# Revoke the stale token so we can generate a fresh one and capture its value.
+- name: Revoke stale jenkins-token (exists in SonarQube but not in vault)
+  uri:
+    url: "http://localhost:9000/api/user_tokens/revoke"
+    method: POST
+    user: admin
+    password: "{{ vault_sonar_admin_password }}"
+    force_basic_auth: yes
+    body_format: form-urlencoded
+    body:
+      name: "jenkins-token"
+    status_code: [200, 204]
+  when:
+    - not sonar_token_in_vault
+    - jenkins_token_exists | default(false)
+
+# Generate a fresh jenkins-token. SonarQube returns the plaintext token value
+# ONLY at generation time — it is never retrievable again after this call.
+# This is why we must write it to vault.yaml immediately after.
+- name: Generate SonarQube user token named 'jenkins-token'
+  uri:
+    url: "http://localhost:9000/api/user_tokens/generate"
+    method: POST
+    user: admin
+    password: "{{ vault_sonar_admin_password }}"
+    force_basic_auth: yes
+    body_format: form-urlencoded
+    body:
+      name: "jenkins-token"
+    status_code: 200
+  register: sonar_token_result
+  when: not sonar_token_in_vault
+
+- name: Store generated token in a fact for the vault write task
+  set_fact:
+    sonar_token_plaintext: "{{ sonar_token_result.json.token }}"
+  when:
+    - not sonar_token_in_vault
+    - sonar_token_result is defined
+    - sonar_token_result.json is defined
+
+
+# ── Vault write (atomic) ──────────────────────────────────────────────────────
+
+# WHY A SINGLE SHELL TASK INSTEAD OF MULTIPLE ANSIBLE TASKS:
+#
+# The old approach used three separate tasks:
+#   Task A: ansible-vault decrypt vault.yaml
+#   Task B: lineinfile to write the token
+#   Task C: (always block) ansible-vault encrypt vault.yaml
+#
+# Problem: if Ansible is killed between Task A and Task C (network drop,
+# Ctrl+C, EC2 spot interruption), vault.yaml is left permanently decrypted
+# on the control node's disk. A single shell task with set -euo pipefail
+# is atomic from Ansible's perspective — either the whole script runs to
+# completion, or it fails and vault.yaml is never modified.
+#
+# WHAT THE SCRIPT DOES:
+#   1. Reads the first line to confirm vault.yaml is encrypted (header check).
+#      Refuses to proceed if not, so a double-run never decrypts an already-
+#      plaintext file with a misleading error.
+#   2. Decrypts vault.yaml into a TEMP file (original is untouched).
+#   3. Strips any existing vault_sonar_token line from the temp file.
+#   4. Appends the new token value.
+#   5. Encrypts the temp file in place.
+#   6. Moves the encrypted temp file over vault.yaml atomically (mv is atomic
+#      on the same filesystem — either the old or new file is visible, never
+#      a half-written state).
+#
+# delegate_to: localhost — the vault file lives on the Ansible control node,
+# not on the remote SonarQube EC2. This task runs locally.
+# run_once: true — only one host in the sonarqube group; defensive guard.
+# become: false — ~/.vault_pass and vault.yaml are owned by the local user,
+# not root. Running as root would fail the file permission checks.
+- name: Atomically write vault_sonar_token into encrypted vault.yaml
+  delegate_to: localhost
+  run_once: true
+  become: false
+  when:
+    - not sonar_token_in_vault
+    - sonar_token_plaintext is defined
+  vars:
+    _vault_file:      "{{ playbook_dir }}/group_vars/all/vault.yaml"
+    _vault_pass_file: "{{ lookup('env', 'HOME') }}/.vault_pass"
+  shell: |
+    set -euo pipefail
+
+    VAULT_FILE="{{ _vault_file }}"
+    VAULT_PASS="{{ _vault_pass_file }}"
+    TOKEN="{{ sonar_token_plaintext }}"
+    TMPFILE="$(mktemp)"
+
+    # ── Guard: confirm vault.yaml is encrypted before touching it ──────────
+    # ansible-vault encrypted files always begin with '$ANSIBLE_VAULT'.
+    # If this check fails the file is already plaintext — do not decrypt again.
+    HEADER="$(head -1 "$VAULT_FILE")"
+    if [[ "$HEADER" != '$ANSIBLE_VAULT'* ]]; then
+      echo "ERROR: vault.yaml does not appear to be encrypted. Refusing to proceed." >&2
+      rm -f "$TMPFILE"
+      exit 1
+    fi
+
+    # ── Step 1: Decrypt into temp file (original vault.yaml is untouched) ──
+    ansible-vault decrypt "$VAULT_FILE" \
+      --vault-password-file "$VAULT_PASS" \
+      --output "$TMPFILE"
+
+    # ── Step 2: Remove old vault_sonar_token line(s), append new value ─────
+    grep -v '^vault_sonar_token:' "$TMPFILE" > "${TMPFILE}.new"
+    echo "vault_sonar_token: \"${TOKEN}\"" >> "${TMPFILE}.new"
+    mv "${TMPFILE}.new" "$TMPFILE"
+
+    # ── Step 3: Encrypt the temp file ──────────────────────────────────────
+    ansible-vault encrypt "$TMPFILE" \
+      --vault-password-file "$VAULT_PASS"
+
+    # ── Step 4: Atomic replace of vault.yaml ───────────────────────────────
+    # mv on the same filesystem is atomic at the OS level.
+    # vault.yaml is never in a partially-written state.
+    mv "$TMPFILE" "$VAULT_FILE"
+
+    echo "vault_sonar_token written and vault.yaml re-encrypted successfully."
+  register: vault_write_result
+  changed_when: true
+
+- name: Confirm vault write result
+  debug:
+    msg: "{{ vault_write_result.stdout_lines }}"
+  when:
+    - not sonar_token_in_vault
+    - vault_write_result is defined
+
+# ── Jenkins webhook ───────────────────────────────────────────────────────────
+
+# Match on webhook NAME ('Jenkins'), not URL substring.
+# URL matching is fragile — the URL format could change if the port or path
+# changes. The name is a stable, explicit identifier.
+- name: List existing SonarQube webhooks
+  uri:
+    url: "http://localhost:9000/api/webhooks/list"
+    method: GET
+    user: admin
+    password: "{{ vault_sonar_admin_password }}"
+    force_basic_auth: yes
+    status_code: 200
+  register: sonar_webhooks
+
+- name: Check if Jenkins webhook already exists (by name)
+  set_fact:
+    jenkins_webhook_exists: >-
+      {{
+        sonar_webhooks.json is defined and
+        (sonar_webhooks.json.webhooks
+          | selectattr('name', 'equalto', 'Jenkins')
+          | list | length > 0)
+      }}
+
+# Only creates the webhook when it does not already exist.
+# SonarQube does not deduplicate webhooks by URL — without this guard,
+# re-running the playbook would create duplicate webhooks.
+- name: Create Jenkins webhook in SonarQube
+  uri:
+    url: "http://localhost:9000/api/webhooks/create"
+    method: POST
+    user: admin
+    password: "{{ vault_sonar_admin_password }}"
+    force_basic_auth: yes
+    body_format: form-urlencoded
+    body:
+      name: "Jenkins"
+      url:  "http://{{ jenkins_host }}:8080/sonarqube-webhook/"
+    status_code: [200, 201]
+  register: webhook_result
+  when: not jenkins_webhook_exists
+
+- name: Confirm Jenkins webhook created
+  debug:
+    msg: "Webhook created → {{ webhook_result.json.webhook.url }}"
+  when:
+    - not jenkins_webhook_exists
+    - webhook_result is defined
+    - webhook_result.json is defined

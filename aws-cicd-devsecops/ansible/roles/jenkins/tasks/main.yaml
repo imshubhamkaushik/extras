@@ -38,6 +38,20 @@
     src: plugins.yaml
     dest: /tmp/plugins.yaml
 
+- name: Download jenkins-plugin-cli
+  get_url:
+    url: "https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.12.13/jenkins-plugin-manager-2.12.13.jar"
+    dest: /usr/local/lib/jenkins-plugin-manager.jar
+    mode: '0644'
+
+- name: Install jenkins-plugin-cli wrapper script
+  copy:
+    dest: /usr/local/bin/jenkins-plugin-cli
+    mode: '0755'
+    content: |
+      #!/bin/bash
+      exec java -jar /usr/local/lib/jenkins-plugin-manager.jar "$@"
+
 - name: Install Jenkins plugins
   shell: |
     jenkins-plugin-cli --plugin-file /tmp/plugins.yaml
@@ -95,9 +109,12 @@
       JENKINS_ADMIN_PASSWORD={{ vault_jenkins_admin_password }}
 
       JENKINS_URL={{ ansible_host }}
-      SONAR_HOST={{ hostvars[groups['sonarqube'][0]]['ansible_host'] }}
+      SONARQUBE_HOST={{ hostvars[groups['sonarqube'][0]]['ansible_host'] }}
 
       GIT_REPO_URL={{ git_repo_url }}
       GITHUB_TOKEN={{ vault_github_token }}
-      SONAR_TOKEN={{ vault_sonar_token }}
+      SONARQUBE_TOKEN={{ vault_sonar_token }}
+      
+      AWS_ACCESS_KEY_ID={{ vault_aws_access_key_id }}
+      AWS_SECRET_ACCESS_KEY={{ vault_aws_secret_access_key }}
   notify: restart jenkins
