@@ -1,0 +1,40 @@
+# SERVICE MONITOR — tells Prometheus (via the Prometheus Operator) to scrape
+# user-svc and product-svc for metrics at /actuator/prometheus every 15s.
+#
+# PREREQUISITE: kube-prometheus-stack must be installed (see README.md).
+# The ServiceMonitor CRD is provided by the Prometheus Operator bundled in that stack.
+#
+# NOTE: frontend-svc is intentionally excluded. nginx does not expose
+# /actuator/prometheus. Add it to the values list only if you add a metrics
+# sidecar or switch to a metrics-capable image.
+#
+# NOTE on label "release: monitoring": Prometheus picks up ServiceMonitors
+# by matching this label against its serviceMonitorSelector. The kube-prometheus-stack
+# install sets this to match release=<helm-release-name>. If you named your
+# Helm release something other than "monitoring", change this label accordingly.
+# The monitoring chart's values.yaml sets serviceMonitorSelectorNilUsesHelmValues: false
+# and an empty selector, so any ServiceMonitor in any namespace is discovered —
+# but the release label is still required by the operator's default config.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: catalogix-services
+  namespace: monitoring
+  labels:
+    release: monitoring   # must match Prometheus Operator's serviceMonitorSelector
+spec:
+  namespaceSelector:
+    matchNames:
+      - catalogix
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - user-svc
+          - product-svc
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s
+      scrapeTimeout: 10s

@@ -1,0 +1,104 @@
+# PRODUCT SERVICE — Spring Boot app on port 8082
+#
+# Same notes as user-svc (03-user-svc.yaml) apply here:
+#   - Replace <your-registry>
+#   - Replace <rds-endpoint>
+#   - catalogix-secrets must exist before pod starts
+#   - ALLOWED_ORIGINS "*" is dev/staging only
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-svc
+  namespace: catalogix
+  labels:
+    app: product-svc
+spec:
+  # replicas intentionally omitted — managed by HPA (product-svc-hpa)
+  selector:
+    matchLabels:
+      app: product-svc
+  template:
+    metadata:
+      labels:
+        app: product-svc
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: product-svc
+          image: "<your-registry>/product-svc:1.0-0"   # REPLACE <your-registry>
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8082
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:postgresql://<rds-endpoint>:5432/catalogix"  # REPLACE <rds-endpoint>
+            - name: SPRING_DATASOURCE_USERNAME
+              value: "catalogix"
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: catalogix-secrets   # created by ExternalSecret in 01-external-secret.yaml
+                  key: DB_PASSWORD
+            - name: ALLOWED_ORIGINS
+              value: "*"   # DEV/STAGING ONLY — restrict to hostname in production
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8082
+            periodSeconds: 5
+            failureThreshold: 30    # 30 * 5s = 150s max startup window for Spring Boot
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8082
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8082
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-svc
+  namespace: catalogix
+  labels:
+    app: product-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: product-svc
+  ports:
+    - name: http
+      port: 8082
+      targetPort: 8082

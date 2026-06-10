@@ -1,0 +1,45 @@
+# ----------------------------------------------------------------------------------------------
+# CVE-2026-22695
+
+# Package : libpng (OS layer — ubuntu/debian base image)
+
+# Severity : HIGH
+
+# Details : Heap buffer over-read in png_image_finish_read() in libpng's simplified read API. Triggered only when an application actively calls the simplified PNG read path with a crafted image.
+
+# Why ignored : None of the services in this project (Spring Boot, React/Nginx) call libpng's simplified read API at runtime. The library is present as an indirect OS dependency (pulled by system tooling) but is never invoked through any application code path. Exploit requires local or network delivery of a malicious PNG directly to the libpng simplified API — attack surface does not exist in this deployment.
+
+# Revisit : When base image is next updated; remove if libpng >= patched version is included.
+
+CVE-2026-22695
+ 
+# ----------------------------------------------------------------------------------------------
+# CVE-2026-22801
+
+# Package : libpng (OS layer — ubuntu/debian base image)
+
+# Severity : HIGH
+
+# Details : Information disclosure and denial of service via integer truncation in the libpng simplified write API (png_image_write_to_file / png_image_write_to_memory).
+
+# Why ignored : This project does not write PNG files at runtime. The simplified write API is not called by Spring Boot, Nginx, or the React build artefacts included in the container. The vulnerability is present only as an unused OS-level library. No network-reachable code path leads to this function.
+
+# Revisit : When base image is next updated; remove if libpng >= patched version is included.
+
+CVE-2026-22801
+
+# ----------------------------------------------------------------------------------------------
+ 
+# CVE-2026-25646
+
+# Package : libpng < 1.6.55 (OS layer — ubuntu/debian base image)
+
+# Severity : HIGH (CVSS 8.1)
+
+# Details : Out-of-bounds read and infinite loop in png_set_quantize() when called with a palette image that has no hIST chunk and more than 2× the display-supported colour count. Fixed in libpng 1.6.55.
+
+# Why ignored : png_set_quantize() is a colour-reduction function used by image-processing applications. None of the containers in this project perform runtime PNG colour quantization. The function is reachable only if an application explicitly calls it — neither Spring Boot nor Nginx does so. Risk is limited to the OS package itself, which cannot be updated independently of the base image at this time.
+
+# Revisit : When base image is next updated; remove once distro ships libpng >= 1.6.55-r0 (Alpine) or equivalent Debian/Ubuntu patch.
+
+CVE-2026-25646

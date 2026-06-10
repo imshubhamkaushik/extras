@@ -1,0 +1,101 @@
+# FRONTEND SERVICE — nginx serving the static SPA
+#
+# NOTE on image: The Helm values have global.imageRegistry: "" (empty string).
+# The template renders as "/frontend-svc:1.0-0" which is invalid (leading slash).
+# YOU MUST replace <your-registry> with your actual ECR/registry URL.
+# e.g. 123456789012.dkr.ecr.ap-south-1.amazonaws.com/frontend-svc:1.0-0
+#
+# NOTE on replicas: Helm omits this field when HPA is enabled to avoid
+# a controller fight. We do the same here — HPA manages replica count.
+# On first deploy K8s defaults to 1; HPA will scale to minReplicas (2) within seconds.
+#
+# NOTE on NET_BIND_SERVICE: nginx binds port 80. A non-root process needs
+# this capability to bind ports < 1024. All other capabilities are dropped.
+# If you switch the image to use port 8080 instead, remove this capability add.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-svc
+  namespace: catalogix
+  labels:
+    app: frontend-svc
+spec:
+  # replicas intentionally omitted — managed by HPA (frontend-svc-hpa)
+  selector:
+    matchLabels:
+      app: frontend-svc
+  template:
+    metadata:
+      labels:
+        app: frontend-svc
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: frontend-svc
+          image: "<your-registry>/frontend-svc:1.0-0"   # REPLACE <your-registry>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "300m"       # staging value; dev uses 200m
+              memory: "256Mi"
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: nginx-log
+              mountPath: /var/log/nginx
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE   # minimum needed to bind port 80 as non-root
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: nginx-log
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-svc
+  namespace: catalogix
+  labels:
+    app: frontend-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend-svc
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

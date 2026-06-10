@@ -1,0 +1,110 @@
+# USER SERVICE — Spring Boot app on port 8081
+#
+# NOTE on image: Same registry issue as frontend — replace <your-registry>.
+# NOTE on replicas: Omitted — managed by HPA (user-svc-hpa).
+# NOTE on DB_PASSWORD: Pulled from catalogix-secrets K8s Secret, which is
+#   created and maintained by the ExternalSecret in 01-external-secret.yaml.
+#   ESO must be running and the ExternalSecret must exist before this pod starts,
+#   otherwise the secretKeyRef will fail and the pod will stay in CreateContainerConfigError.
+# NOTE on database.host: The Helm values have this as "" (empty).
+#   Jenkins injects it at deploy time via --set database.host=<rds-endpoint>.
+#   YOU MUST hardcode the RDS endpoint here or inject it via a ConfigMap/env mechanism.
+# NOTE on ALLOWED_ORIGINS "*": This is explicitly flagged in the Helm values as
+#   "DEV ONLY pattern". Restrict this to your ALB/Route53 hostname in production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-svc
+  namespace: catalogix
+  labels:
+    app: user-svc
+spec:
+  # replicas intentionally omitted — managed by HPA (user-svc-hpa)
+  selector:
+    matchLabels:
+      app: user-svc
+  template:
+    metadata:
+      labels:
+        app: user-svc
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: user-svc
+          image: "<your-registry>/user-svc:1.0-0"   # REPLACE <your-registry>
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8081
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:postgresql://<rds-endpoint>:5432/catalogix"  # REPLACE <rds-endpoint>
+            - name: SPRING_DATASOURCE_USERNAME
+              value: "catalogix"
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: catalogix-secrets   # created by ExternalSecret in 01-external-secret.yaml
+                  key: DB_PASSWORD
+            - name: ALLOWED_ORIGINS
+              value: "*"   # DEV/STAGING ONLY — restrict to hostname in production
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            periodSeconds: 5
+            failureThreshold: 30    # 30 * 5s = 150s max startup window for Spring Boot
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-svc
+  namespace: catalogix
+  labels:
+    app: user-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: user-svc
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
